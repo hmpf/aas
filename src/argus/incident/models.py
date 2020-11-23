@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import reduce
-from operator import and_
+from operator import and_, or_
 from random import randint
 from urllib.parse import urljoin
 
@@ -79,9 +79,7 @@ class SourceSystem(models.Model):
     )
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["name", "type"], name="%(class)s_unique_name_per_type"),
-        ]
+        constraints = [models.UniqueConstraint(fields=["name", "type"], name="%(class)s_unique_name_per_type")]
 
     def __str__(self):
         return f"{self.name} ({self.type})"
@@ -89,12 +87,12 @@ class SourceSystem(models.Model):
 
 class TagQuerySet(models.QuerySet):
     def parse(self, *tags):
-        "Return a list of querysets that match `tags`"
+        "Return a queryset that matches `tags`"
         set_dict = defaultdict(set)
         for k, v in (Tag.split(tag) for tag in tags):
             set_dict[k].add(v)
         querysets = [self.filter(key=k, value__in=v) for k, v in set_dict.items()]
-        return querysets
+        return reduce(or_, querysets)
 
     def create_from_tag(self, tag):
         key, value = Tag.split(tag)
@@ -110,9 +108,7 @@ class Tag(models.Model):
     objects = TagQuerySet.as_manager()
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["key", "value"], name="%(class)s_unique_key_and_value"),
-        ]
+        constraints = [models.UniqueConstraint(fields=["key", "value"], name="%(class)s_unique_key_and_value")]
 
     def __str__(self):
         return self.representation
@@ -137,9 +133,7 @@ class IncidentTagRelation(models.Model):
     added_time = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["tag", "incident"], name="%(class)s_unique_tags_per_incident"),
-        ]
+        constraints = [models.UniqueConstraint(fields=["tag", "incident"], name="%(class)s_unique_tags_per_incident")]
 
     def __str__(self):
         return f"Tag <{self.tag}> on incident #{self.incident.pk} added by {self.added_by}"
@@ -151,6 +145,11 @@ class IncidentQuerySet(models.QuerySet):
         This should not be used, as it doesn't call `save()`, which breaks things like the ws (WebSocket) app.
         """
         raise NotImplementedError()
+
+    def prefetch_default_related(self):
+        return self.prefetch_related("incident_tag_relations__tag", "source__type")
+
+    # BEGIN: Lookup helpers, for filter-logic
 
     def stateful(self):
         return self.filter(end_time__isnull=False)
@@ -176,16 +175,16 @@ class IncidentQuerySet(models.QuerySet):
     def lacks_ticket(self):
         return self.filter(ticket_url="")
 
-    def prefetch_default_related(self):
-        return self.prefetch_related("incident_tag_relations__tag", "source__type")
-
     def from_tags(self, *tags):
-        tag_qss = Tag.objects.parse(*tags)
+        tag_qs = Tag.objects.parse(*tags)
         qs = []
-        for tag_qs in tag_qss:
-            qs.append(self.filter(incident_tag_relations__tag__in=tag_qs))
+        for tag in tag_qs:
+            qs.append(self.filter(incident_tag_relations__tag=tag))
         qs = reduce(and_, qs)
         return qs.distinct()
+
+    def from_source_ids(self, *ids):
+        return self.filter(source__id__in=ids)
 
     # Cannot be a constant, because `timezone.now()` would have been evaluated at compile time
     @staticmethod
@@ -193,6 +192,8 @@ class IncidentQuerySet(models.QuerySet):
         acks_query = Q(events__ack__isnull=False)
         acks_not_expired_query = Q(events__ack__expiration__isnull=True) | Q(events__ack__expiration__gt=timezone.now())
         return acks_query & acks_not_expired_query
+
+    # END: Lookup helpers, for filter-logic
 
 
 # TODO: review whether fields should be nullable, and on_delete modes
@@ -313,6 +314,21 @@ class Incident(models.Model):
         if base_url:
             return urljoin(base_url, path)
         return path  # Just show the relative url
+
+    # BEGIN: Lookup helpers, for filter-logic
+
+    def has_source_id(self, *source_ids):
+        "Check if incident has one of the sources, by id"
+        return self.source.id in source_ids
+
+    def has_tags(self, *tags):
+        "Check if incident has all tags"
+        if not tags:  # Sheer paranoia
+            return False
+        existing_tags = set(tag.join() for tag in self.tags)
+        return existing_tags.issuperset(tags)
+
+    # END: Lookup helpers, for filter-logic
 
 
 class IncidentRelationType(models.Model):

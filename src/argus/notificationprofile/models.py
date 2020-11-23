@@ -116,6 +116,7 @@ class Filter(models.Model):
         data = self.filter_json
         filtered_by_source = self.incidents_with_source_systems(data)
         filtered_by_tags = self.incidents_with_tags(data)
+        # DISTINCT
         return filtered_by_source & filtered_by_tags
 
     def incidents_with_source_systems(self, data=None):
@@ -123,7 +124,7 @@ class Filter(models.Model):
             data = self.filter_json
         source_list = data.pop("sourceSystemIds", [])
         if source_list:
-            return self.all_incidents.filter(source__in=source_list).distinct()
+            return self.all_incidents.from_source_ids(*source_list).distinct()
         return self.all_incidents.distinct()
 
     def source_system_fits(self, incident: Incident, data=None):
@@ -139,13 +140,16 @@ class Filter(models.Model):
             data = self.filter_json
         tags_list = data.pop("tags", [])
         if tags_list:
-            return self.all_incidents.from_tags(*tags_list)
+            return self.all_incidents.from_tags(*tags_list).distinct()
         return self.all_incidents.distinct()
 
     def tags_fit(self, incident: Incident, data=None):
         if not data:
             data = self.filter_json
-        return self.incidents_with_tags(data).filter(id=incident.id).exists()
+        tags_list = data.pop("tags", [])
+        if tags_list:
+            return incident.has_tags(*tags_list)
+        return False
 
     def incident_fits(self, incident: Incident):
         data = self.filter_json
@@ -161,10 +165,7 @@ class NotificationProfile(models.Model):
 
     user = models.ForeignKey(to=User, on_delete=models.CASCADE, related_name="notification_profiles")
     timeslot = models.OneToOneField(
-        to=Timeslot,
-        on_delete=models.CASCADE,
-        primary_key=True,
-        related_name="notification_profile",
+        to=Timeslot, on_delete=models.CASCADE, primary_key=True, related_name="notification_profile"
     )
     filters = models.ManyToManyField(to=Filter, related_name="notification_profiles")
 
@@ -179,6 +180,7 @@ class NotificationProfile(models.Model):
     @property
     def filtered_incidents(self):
         qs = [filter_.filtered_incidents for filter_ in self.filters.all()]
+        # DISTINCT
         return reduce(or_, qs)
 
     def incident_fits(self, incident: Incident):
